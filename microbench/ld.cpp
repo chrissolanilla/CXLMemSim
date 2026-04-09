@@ -43,7 +43,7 @@
   "add $" STR(MOVE_SIZE) ", %%r8 \n" \
   "cmp $" STR(FENCE_BOUND) ",%%r8\n" \
   "jl LOOP_START%= \n"  \
-  "mfence\n"  
+  "mfence\n"
 
 int main(int argc, char **argv) {
 
@@ -110,6 +110,7 @@ for (int i=0;i<1e3;i++){
 
 
   printf("%lu\n", nanos);
+  printf("\nlol what\n");
 }
   return 0;
 }

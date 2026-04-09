@@ -201,9 +201,13 @@ int main(int argc, char *argv[]) {
     SPDLOG_DEBUG("cpu_freq:{}", frequency);
     SPDLOG_DEBUG("num_of_cha:{}", ncha);
     SPDLOG_DEBUG("num_of_cpu:{}", ncpu);
+
+	//might be a bug here cause j is the value from the vector
     for (auto j : cpuset) {
-        helper.used_cpu.push_back(cpuset[j]);
-        helper.used_cha.push_back(cpuset[j]);
+        // helper.used_cpu.push_back(cpuset[j]);
+        // helper.used_cha.push_back(cpuset[j]);
+        helper.used_cpu.push_back(j);
+        helper.used_cha.push_back(j);
     }
     monitors = new Monitors{tnum, &use_cpuset};
 
@@ -297,7 +301,8 @@ int main(int argc, char *argv[]) {
     while (true) {
         uint64_t calibrated_delay;
         for (size_t i = 0; i < monitors->mon.size(); i++) {
-            const auto &mon = monitors->mon[i];
+            //const auto &mon = monitors->mon[i];
+            auto &mon = monitors->mon[i];
             // check other process
             auto m_status = mon.status.load();
             if (m_status == MONITOR_DISABLE) {
@@ -364,11 +369,15 @@ int main(int argc, char *argv[]) {
                 SPDLOG_DEBUG("diff_nsec:{}", diff_nsec);
 
                 calibrated_delay = diff_nsec > emul_delay ? 0 : emul_delay - diff_nsec;
+
+				//some bug in here where its a read only obj?
                 mon.total_delay += (double)calibrated_delay / 1000000000;
                 diff_nsec = 0;
 
                 /* insert emulated NVM latency */
+				//some bug in here where its a read only obj?
                 mon.injected_delay.tv_sec += std::lround(calibrated_delay / 1000000000);
+				//some bug in here where its a read only obj?
                 mon.injected_delay.tv_nsec += std::lround(calibrated_delay % 1000000000);
                 SPDLOG_DEBUG("[{}:{}:{}]delay:{} , total delay:{}", i, mon.tgid, mon.tid, calibrated_delay,
                              mon.total_delay);

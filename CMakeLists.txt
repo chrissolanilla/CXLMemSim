@@ -26,17 +26,49 @@ list(APPEND CMAKE_PREFIX_PATH ${CMAKE_BINARY_DIR})
 
 find_package(cxxopts REQUIRED)
 find_package(spdlog REQUIRED)
-file(GLOB_RECURSE SOURCE_FILES src/cxl*.cpp src/policy.cpp src/helper.cpp src/incore.cpp src/uncore.cpp src/perf.cpp src/monitor.cpp)
+
+#do i need to comment this out?
+# file(GLOB_RECURSE SOURCE_FILES src/cxl*.cpp src/policy.cpp src/helper.cpp src/incore.cpp src/uncore.cpp src/perf.cpp src/monitor.cpp)
 
 execute_process(COMMAND uname -r OUTPUT_VARIABLE arch OUTPUT_STRIP_TRAILING_WHITESPACE)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fPIC -pthread")
 set(CMAKE_EXE_LINKER_FLAGS  "${CMAKE_EXE_LINKER_FLAGS} -latomic")
+
+set(SOURCE_FILES
+    src/cxlcontroller.cpp
+    src/cxlendpoint.cpp
+    src/policy.cpp
+    src/helper.cpp
+    src/incore.cpp
+    src/uncore.cpp
+    src/perf.cpp
+    src/monitor.cpp
+    src/pebs.cpp
+    src/lbr.cpp
+)
+
 
 
 # Create a static library of CXL core functionality
 add_library(cxlmemsim STATIC ${SOURCE_FILES})
 target_include_directories(cxlmemsim PUBLIC include ${cxxopts_INCLUDE_DIR} ${spdlog_INCLUDE_DIR})
 target_link_libraries(cxlmemsim cxxopts::cxxopts spdlog::spdlog_header_only)
+
+#CHRIS EDIT
+# Build the actual main cxlMemSim Runner
+add_executable(cxlmemsim_runner src/main.cc)
+target_include_directories(cxlmemsim_runner PRIVATE include src ${cxxopts_INCLUDE_DIR} ${spdlog_INCLUDE_DIR})
+# target_link_libraries(cxlmemsim_runner cxlmemsim cxxopts::cxxopts spdlog::spdlog_header_only rt)
+target_link_libraries(cxlmemsim_runner
+	cxlmemsim
+    cxlmemsim_server_lib
+    cxxopts::cxxopts
+    spdlog::spdlog_header_only
+    rt
+)
+set_target_properties(cxlmemsim_runner PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
 
 # Build latency calculator
 add_executable(cxlmemsim_latency src/calculateLatency.cc)
@@ -51,7 +83,17 @@ add_compile_definitions(HAS_RDMA)
 set(RDMA_LIBS ${RDMACM_LIB} ${IBVERBS_LIB})
 
 # Server library (shared between server executable and tests)
-set(SERVER_LIB_SOURCES src/shared_memory_manager.cc src/shm_communication.cpp src/distributed_server.cpp src/tcp_communication.cpp src/rdma_communication.cpp src/hdm_decoder.cpp src/coherency_engine.cpp)
+set(
+	SERVER_LIB_SOURCES
+	src/shared_memory_manager.cc
+	src/shm_communication.cpp
+	src/distributed_server.cpp
+	src/tcp_communication.cpp
+	src/rdma_communication.cpp
+	src/hdm_decoder.cpp
+	src/coherency_engine.cpp
+)
+
 add_library(cxlmemsim_server_lib STATIC ${SERVER_LIB_SOURCES})
 target_include_directories(cxlmemsim_server_lib PUBLIC include src ${cxxopts_INCLUDE_DIR} ${spdlog_INCLUDE_DIR})
 target_link_libraries(cxlmemsim_server_lib cxlmemsim cxxopts::cxxopts spdlog::spdlog_header_only rt ${RDMA_LIBS})

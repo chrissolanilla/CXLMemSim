@@ -1,4 +1,12 @@
 
+#disk images
+*.qcow2
+*.img
+*.iso
+*.raw
+*.vmdk
+*.vdi
+
 .cache
 .idea
 build

@@ -1,4 +1,6 @@
-
+# images
+qemu_integration/qemu.img
+qemu_integration/bzImage
 #disk images
 *.qcow2
 *.img

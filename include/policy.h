@@ -58,7 +58,7 @@ public:
         return migration_list.empty() ? 0 : 1;
     }
 
-    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) {
+    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) override {
         std::vector<std::tuple<uint64_t, uint64_t>> to_migrate;
 
         // 定义页面大小
@@ -490,7 +490,7 @@ public:
         return migration_list.empty() ? 0 : 1;
     }
 
-    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) {
+    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) override {
         std::vector<std::tuple<uint64_t, uint64_t>> to_migrate;
 
         // 定义页面大小
@@ -633,7 +633,7 @@ public:
         return 0;
     }
 
-    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) {
+    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) override {
         std::vector<std::tuple<uint64_t, uint64_t>> to_migrate;
 
         // 定义页面大小
@@ -759,7 +759,7 @@ public:
         return migration_list.empty() ? 0 : 1;
     }
 
-    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) {
+    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) override {
         std::vector<std::tuple<uint64_t, uint64_t>> to_migrate;
 
         // 遍历所有页面的访问模式
@@ -800,7 +800,7 @@ public:
         return migration_list.empty() ? 0 : 1;
     }
 
-    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) {
+    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) override {
         std::vector<std::tuple<uint64_t, uint64_t>> to_migrate;
 
         // 定义页面大小
@@ -855,7 +855,7 @@ public:
         return result;
     }
 
-    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) {
+    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) override {
         std::vector<std::tuple<uint64_t, uint64_t>> to_migrate;
 
         // 收集所有策略的迁移列表
@@ -869,6 +869,62 @@ public:
         to_migrate.erase(std::unique(to_migrate.begin(), to_migrate.end()), to_migrate.end());
 
         return to_migrate;
+    }
+};
+
+// FractionGuidedMigrationPolicy
+//
+// A migration policy that tries to maintain a target fraction of pages
+// in controller-local memory. The policy:
+//   1. estimates per-page importance using weighted hotness,
+//   2. compares the current local fraction against a target,
+//   3. promotes the highest-score remote pages when below target,
+//   4. demotes the lowest-score local pages when above target.
+//
+// This policy is used by the experiment harness as a simple actuator:
+// the target fraction may be fixed or supplied by an external model.
+class FractionGuidedMigrationPolicy : public MigrationPolicy {
+public:
+    double target_fraction_local;   // desired fraction of pages in controller/local memory
+    double tolerance;               // deadband to avoid oscillation
+    size_t batch_size;              // max pages migrated per round
+    uint64_t cleanup_interval;      // periodic reset of access counters
+    uint64_t last_cleanup;
+
+    // address -> observed access count
+    std::unordered_map<uint64_t, uint64_t> access_score;
+
+    explicit FractionGuidedMigrationPolicy(double target = 0.5,
+                                           double tol = 0.05,
+                                           size_t batch = 8,
+                                           uint64_t interval = 10000000)
+        : target_fraction_local(target),
+          tolerance(tol),
+          batch_size(batch),
+          cleanup_interval(interval),
+          last_cleanup(0) {}
+
+    void record_access(uint64_t addr, double weight = 1.0) {
+      access_score[addr] += weight;
+    }
+
+    int compute_once(CXLController *controller) override;
+
+    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) override;
+
+private:
+    static uint64_t page_size_bytes(page_type pt) {
+        switch (pt) {
+        case CACHELINE:
+            return 64;
+        case PAGE:
+            return 4096;
+        case HUGEPAGE_2M:
+            return 2ULL * 1024 * 1024;
+        case HUGEPAGE_1G:
+            return 1024ULL * 1024 * 1024;
+        }
+        return 4096;
     }
 };
 #endif // CXLMEMSIM_POLICY_H

@@ -9,6 +9,7 @@
  *  UC Santa Cruz Sluglab.
  */
 
+#include <iostream>
 #include "policy.h"
 #include <numeric>
 PagingPolicy::PagingPolicy() = default;
@@ -212,4 +213,117 @@ bool FrequencyBasedInvalidationPolicy::should_cache(uint64_t addr, uint64_t time
 int FrequencyBasedInvalidationPolicy::compute_once(CXLController *controller) {
     // 如果有需要失效的地址，返回正数
     return !get_invalidation_list(controller).empty() ? 1 : 0;
+}
+
+int FractionGuidedMigrationPolicy::compute_once(CXLController *controller) {
+  // Refresh weighted hotness scores from current placement state.
+  // By default each observed page contributes weight 1.0 here;
+  // the experiment harness can inject larger weights explicitly
+  // to model pages with greater performance importance.
+  for (const auto&[timestamp, info] : controller->occupation) {
+    record_access(info.address);
+  } 
+
+  // Update access counts from direct expanders
+  for (auto *expander : controller->expanders) {
+    if (!expander) continue;
+    for (const auto &info : expander->occupation) {
+        record_access(info.address);
+    }
+  }
+
+  // Periodically decay/reset the counters to avoid unbounded growth
+  uint64_t current_time = controller->last_timestamp;
+  if (current_time - last_cleanup > cleanup_interval) {
+    access_score.clear();
+    last_cleanup = current_time;
+  }
+
+  auto migration_list = get_migration_list(controller);
+  return migration_list.empty() ? 0 : 1;
+}
+
+std::vector<std::tuple<uint64_t, uint64_t>>
+FractionGuidedMigrationPolicy::get_migration_list(CXLController *controller) {
+  std::vector<std::tuple<uint64_t, uint64_t>> to_migrate;
+
+  const uint64_t per_size = page_size_bytes(controller->page_type_);
+
+  // Count local and remote pages
+  size_t local_pages = controller->occupation.size();
+  size_t remote_pages = 0;
+
+  for (auto *expander : controller->expanders) {
+    if(!expander) continue;
+    remote_pages += expander->occupation.size();
+  }
+
+  size_t total_pages = local_pages + remote_pages;
+  if (total_pages == 0) {
+    return to_migrate;
+  }
+
+  double current_fraction_local = static_cast<double>(local_pages) / static_cast<double>(total_pages);
+
+  // Case 1: local fraction is too small -> pull hottest remote pages into local
+  if (current_fraction_local < target_fraction_local - tolerance) {
+    std::vector<std::pair<double, uint64_t>> remote_candidates; // <importance_score, addr>
+
+    for (auto *expander : controller->expanders) {
+      if (!expander) continue;
+      for (const auto &info : expander->occupation) {
+        double score = 0.0;
+        auto it = access_score.find(info.address);
+        if (it != access_score.end()) {
+          score = it->second;
+        }
+        remote_candidates.emplace_back(score, info.address);
+      }
+    }
+
+    // hottest first
+    std::sort(remote_candidates.begin(), remote_candidates.end(),
+      [](const auto &a, const auto &b) {
+        if (a.first != b.first) return a.first > b.first; 
+        return a.second < b.second;
+      });
+
+    size_t moves = std::min(batch_size, remote_candidates.size());
+    for (size_t i = 0; i < moves; i++) {
+      to_migrate.emplace_back(remote_candidates[i].second, per_size);
+    }
+
+    return to_migrate;
+  }
+
+  // Case 2: local fraction is too large -> push coldest local pages out
+  if (current_fraction_local > target_fraction_local + tolerance) {
+    std::vector<std::pair<double, uint64_t>> local_candidates; // <importance_score, addr>
+
+    for (const auto &[timestamp, info] : controller->occupation) {
+      double score = 0.0;
+      auto it = access_score.find(info.address);
+      if (it != access_score.end()) {
+        score = it->second;
+      }
+      local_candidates.emplace_back(score, info.address);
+    }
+
+    // coldest first
+    std::sort(local_candidates.begin(), local_candidates.end(),
+      [](const auto &a, const auto &b) {
+          if (a.first != b.first) return a.first < b.first;
+          return a.second < b.second;
+      });
+
+    size_t moves = std::min(batch_size, local_candidates.size());
+    for (size_t i = 0; i < moves; i++) {
+      to_migrate.emplace_back(local_candidates[i].second, per_size);
+    }
+    std::cerr << "[FGMP] pushing out " << moves << " pages (local -> remote)" << std::endl;
+    return to_migrate;
+  }
+
+  // Already close enough to target
+  return to_migrate;
 }

@@ -380,7 +380,7 @@ int main(int argc, char *argv[]) {
     // Initialize policies
     std::array<Policy *, 4> policies = {
         new AllocationPolicy(),
-        new MigrationPolicy(),
+        new FractionGuidedMigrationPolicy(0.5, 0.05, 8),
         new PagingPolicy(),
         new CachingPolicy()
     };

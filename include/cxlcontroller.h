@@ -56,10 +56,8 @@ public:
 
     // 获取需要迁移的地址列表
     // Get the list of addresses that need migration
-    std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) {
+    virtual std::vector<std::tuple<uint64_t, uint64_t>> get_migration_list(CXLController *controller) {
         std::vector<std::tuple<uint64_t, uint64_t>> migration_list;
-        // 基类提供空实现
-        // Base class provides empty implementation
         return migration_list;
     }
     // 判断特定地址是否应该迁移
@@ -228,6 +226,8 @@ public:
     PagingPolicy *paging_policy{};
     CachingPolicy *caching_policy{};
     CXLCounter counter;
+    // Local-memory placement state. Keys are insertion/migration timestamps;
+    // values describe the page currently resident in the controller
     std::map<uint64_t, occupation_info> occupation;
     page_type page_type_; // percentage
     // no need for va pa map because v-indexed will not caught by us

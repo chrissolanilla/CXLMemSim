@@ -9,6 +9,7 @@
  *  UC Santa Cruz Sluglab.
  */
 
+#include <iostream>
 #include "cxlcontroller.h"
 #include "lbr.h"
 #include "monitor.h"
@@ -80,6 +81,8 @@ double CXLController::calculate_bandwidth(const std::vector<std::tuple<uint64_t,
 void CXLController::perform_migration() {
     if (!migration_policy)
         return;
+
+    uint64_t migration_timestamp = occupation.empty() ? last_timestamp : std::max(last_timestamp, occupation.rbegin()->first);
 
     // 获取需要迁移的列表 <物理地址, 大小>
     auto migration_list = migration_policy->get_migration_list(this);
@@ -175,8 +178,7 @@ void CXLController::perform_migration() {
                 auto &info = src_expander->occupation[i];
                 if (info.address == addr) {
                     // 复制数据到控制器
-                    uint64_t current_timestamp = last_timestamp;
-                    occupation.emplace(current_timestamp, info);
+                    occupation.emplace(++migration_timestamp, info);
 
                     // 更新统计信息
                     src_expander->counter.migrate_out.increment();
@@ -330,6 +332,9 @@ int CXLController::insert(uint64_t timestamp, uint64_t tid, uint64_t phys_addr, 
             }
         }
     }
+    // Trigger policy-driven migration/invalidation periodically after enough
+    // accesses have accumulated. This modles coarse-grained control epochs
+    // rather than per-access policy execution
     static int request_counter = 0;
     request_counter += (index - last_index);
     if (request_counter >= 1000) {

@@ -66,6 +66,11 @@ add_executable(test_distributed_shm tests/test_distributed_shm.cpp)
 target_include_directories(test_distributed_shm PRIVATE include src ${cxxopts_INCLUDE_DIR} ${spdlog_INCLUDE_DIR})
 target_link_libraries(test_distributed_shm cxlmemsim_server_lib cxlmemsim cxxopts::cxxopts spdlog::spdlog_header_only rt)
 
+# Fraction guided migration test
+add_executable(test_fraction_guided_migration tests/test_fraction_guided_migration.cpp)
+target_include_directories(test_fraction_guided_migration PRIVATE include src ${cxxopts_INCLUDE_DIR} ${spdlog_INCLUDE_DIR})
+target_link_libraries(test_fraction_guided_migration cxlmemsim cxlmemsim_server_lib cxxopts::cxxopts spdlog::spdlog_header_only rt)
+
 # Installation targets
 install(TARGETS cxlmemsim_server
         RUNTIME DESTINATION bin)

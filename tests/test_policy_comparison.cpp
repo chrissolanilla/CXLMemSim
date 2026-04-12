@@ -5,6 +5,7 @@
 #include "policy_test_common.h"
 #include "paper_fraction_model.h"
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <iostream>
@@ -157,9 +158,7 @@ ExperimentResult run_policy(const ScenarioConfig& scenario, PolicyKind kind) {
     CXLController ctrl(policies, 256, page_type::PAGE, 10, 100.0);
     controller = &ctrl;
 
-    auto* exp = new CXLMemExpander(
-        20000, 20000, 200, 250, 0, 256
-    );
+    auto* exp = new CXLMemExpander(20000, 20000, 200, 250, 0, 256);
 
     ctrl.insert_end_point(exp);
     ctrl.expanders.push_back(exp);
@@ -249,19 +248,34 @@ ExperimentResult run_policy(const ScenarioConfig& scenario, PolicyKind kind) {
     return result;
 }
 
-void write_csv(const std::string& filename, const std::vector<ExperimentResult>& results) {
+void write_sweep_csv(const std::string& filename,
+                     const std::vector<SweepRow>& rows) {
     std::ofstream out(filename);
     if (!out) {
         std::cerr << "failed to open " << filename << "\n";
         return;
     }
 
-    out << "policy,chosen_target_fraction,final_fraction,local_pages,remote_pages,"
-           "moved_pages,promoted_pages,demoted_pages,rounds_with_migration,"
+    out << "num_pages,hot_pages,rounds,accesses_per_round,batch_size,tolerance,"
+           "r,k,m,alpha,policy,chosen_target_fraction,final_fraction,local_pages,"
+           "remote_pages,moved_pages,promoted_pages,demoted_pages,rounds_with_migration,"
            "cost1_in_cxl,cost2_policy,g_of_x\n";
 
-    for (const auto& r : results) {
-        out << r.policy_name << ","
+    for (const auto& row : rows) {
+        const auto& s = row.scenario;
+        const auto& r = row.result;
+
+        out << s.num_pages << ","
+            << s.hot_pages << ","
+            << s.rounds << ","
+            << s.accesses_per_round << ","
+            << s.batch_size << ","
+            << s.tolerance << ","
+            << s.r << ","
+            << s.k << ","
+            << s.m << ","
+            << s.alpha << ","
+            << r.policy_name << ","
             << r.chosen_target_fraction << ","
             << r.final_fraction << ","
             << r.local_pages << ","
@@ -276,45 +290,113 @@ void write_csv(const std::string& filename, const std::vector<ExperimentResult>&
     }
 }
 
+bool has_flag(int argc, char** argv, const std::string& flag) {
+    for (int i = 1; i < argc; i++) {
+        if (argv[i] == flag) return true;
+    }
+    return false;
+}
+
 } // namespace
 
-int main() {
-    ScenarioConfig scenario{};
+int main(int argc, char** argv) {
+    ScenarioConfig base{};
 
-    // Start small so the target fraction is actually reachable.
-    scenario.num_pages = 64;
-    scenario.hot_pages = 8;
-    scenario.rounds = 8;
-    scenario.accesses_per_round = 200;
-    scenario.batch_size = 8;
-    scenario.tolerance = 0.05;
+    // workload defaults
+    base.num_pages = 64;
+    base.hot_pages = 8;
+    base.rounds = 8;
+    base.accesses_per_round = 200;
+    base.batch_size = 8;
+    base.tolerance = 0.05;
 
-    // Paper-inspired parameters.
-    // These are not measured from CXLMemSim yet; they are placeholders.
-    // TODO: replace with profiled values from your simulator or experiments.
-    scenario.r = 1.0;
-    scenario.k = 2.3534;
-    scenario.m = 1.0977;
-    scenario.alpha = 0.60;
+    // default paper-model parameters
+    base.r = 1.0;
+    base.k = 2.3534;
+    base.m = 1.0977;
+    base.alpha = 0.60;
 
-    std::vector<ExperimentResult> results;
-    results.push_back(run_policy(scenario, PolicyKind::NoMigration));
-    results.push_back(run_policy(scenario, PolicyKind::FullMigration));
-    results.push_back(run_policy(scenario, PolicyKind::NaiveHotness));
-    results.push_back(run_policy(scenario, PolicyKind::PaperPlannedFractionGuided));
+    const bool sweep_paper_params = has_flag(argc, argv, "--full_sweep");
+    const bool verbose = has_flag(argc, argv, "--verbose");
 
-    std::cout << "=== Paper-Inspired Policy Comparison ===\n";
-    for (const auto& r : results) {
-        std::cout << r.policy_name
-                  << " | chosen_target=" << r.chosen_target_fraction
-                  << " | final_fraction=" << r.final_fraction
-                  << " | moved=" << r.moved_pages
-                  << " | realized cost(cost2)=" << r.realized_cost
-                  << " | speedup vs baseline(g(x)) =" << r.speedup_vs_baseline
-                  << "\n";
+    // existing scenario sweeps if you want them
+    const std::vector<int> num_pages_values = {64, 128, 256, 512};
+    const std::vector<double> hot_fraction_values = {0.05, 0.10, 0.125, 0.20, 0.25, 0.40};
+    const std::vector<int> batch_size_values = {4, 8, 16, 32};
+
+    // paper parameter lists
+    std::vector<double> k_values;
+    std::vector<double> m_values;
+    std::vector<double> alpha_values;
+
+    if (sweep_paper_params) {
+        k_values = {1.25, 1.75, 2.0, 2.35, 3.0};
+        m_values = {0.25, 0.75, 1.0977, 1.5, 2.0, 2.25, 2.5, 2.75, 3.0};
+        alpha_values = {0.20, 0.40, 0.60, 0.80, 1.0};
+    } else {
+        k_values = {base.k};
+        m_values = {base.m};
+        alpha_values = {base.alpha};
     }
 
-    write_csv("policy_comparison.csv", results);
-    std::cout << "wrote policy_comparison.csv\n";
+    const std::vector<PolicyKind> policies = {
+        PolicyKind::NoMigration,
+        PolicyKind::FullMigration,
+        PolicyKind::NaiveHotness,
+        PolicyKind::PaperPlannedFractionGuided
+    };
+
+    std::vector<SweepRow> rows;
+
+    for (int num_pages : num_pages_values) {
+        for (double hot_fraction : hot_fraction_values) {
+            for (int batch_size : batch_size_values) {
+                for (double k : k_values) {
+                    for (double m : m_values) {
+                        for (double alpha : alpha_values) {
+                            ScenarioConfig scenario = base;
+                            scenario.num_pages = num_pages;
+                            scenario.hot_pages =
+                                std::max(1, static_cast<int>(num_pages * hot_fraction));
+                            scenario.batch_size = std::min(batch_size, scenario.hot_pages);
+
+                            scenario.k = k;
+                            scenario.m = m;
+                            scenario.alpha = alpha;
+
+                            for (PolicyKind policy : policies) {
+                                ExperimentResult result = run_policy(scenario, policy);
+                                rows.push_back({scenario, result});
+
+                                if (verbose)
+                                {
+                                    std::cout
+                                        << "pages=" << scenario.num_pages
+                                        << " hot=" << scenario.hot_pages
+                                        << " batch=" << scenario.batch_size
+                                        << " k=" << scenario.k
+                                        << " m=" << scenario.m
+                                        << " alpha=" << scenario.alpha
+                                        << " policy=" << result.policy_name
+                                        << " chosen_target=" << result.chosen_target_fraction
+                                        << " final_fraction=" << result.final_fraction
+                                        << " g=" << result.speedup_vs_baseline
+                                        << "\n";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const std::string out_name =
+        sweep_paper_params ? "policy_sweep_full.csv"
+                           : "policy_sweep_default.csv";
+
+    write_sweep_csv(out_name, rows);
+
+    std::cout << "wrote " << out_name << " with " << rows.size() << " rows\n";
     return 0;
 }

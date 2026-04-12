@@ -44,3 +44,8 @@ struct ExperimentResult {
 	//g(x) value(but the other polices it wouldnt make sense with this name)
     double speedup_vs_baseline = 0.0;
 };
+
+struct SweepRow {
+    ScenarioConfig scenario;
+    ExperimentResult result;
+};

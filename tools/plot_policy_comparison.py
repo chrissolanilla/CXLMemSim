@@ -1,247 +1,319 @@
-#!/usr/bin/env python3
+3
 
-import argparse
-import math
-import os
+import csv
+from collections import defaultdict
 from pathlib import Path
 
-import pandas as pd
 import matplotlib.pyplot as plt
 
 
-def require_columns(df: pd.DataFrame, required: list[str]) -> None:
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"CSV is missing required columns: {missing}")
+INPUT_CSV = "build/policy_sweep_full.csv"
+OUTPUT_PNG = "plots/policy_barplot_representative_lambda.png"
+
+# Keep one representative scenario fixed.
+FILTERS = {
+    "num_pages": 64,
+    "hot_pages": 8,
+    "batch_size": 8,
+    "alpha": 1.0,
+}
+
+POLICY_ORDER = [
+    "no_migration",
+    "full_migration",
+    "naive_hotness",
+    "paper_fraction_guided",
+]
+
+POLICY_LABELS = {
+    "no_migration": "no migration",
+    "full_migration": "full migration",
+    "naive_hotness": "naive hotness",
+    "paper_fraction_guided": "paper fraction guided",
+}
+
+# Target lambda values for representative case studies.
+# The script will choose the closest available scenario to each target.
+TARGET_LAMBDAS = [0.75, 1.00, 2.50, 4.00, 7.00]
 
 
-def safe_mean_table(df: pd.DataFrame, index: str, columns: str, values: str) -> pd.DataFrame:
-    table = pd.pivot_table(
-        df,
-        index=index,
-        columns=columns,
-        values=values,
-        aggfunc="mean",
-    )
-    return table.sort_index().sort_index(axis=1)
+def float_equal(a: float, b: float, eps: float = 1e-9) -> bool:
+    return abs(a - b) < eps
 
 
-def save_fig(fig: plt.Figure, outdir: Path, name: str) -> None:
-    outpath = outdir / name
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    print(f"wrote {outpath}")
+def parse_row(row: dict[str, str]) -> dict[str, object]:
+    return {
+        "num_pages": int(row["num_pages"]),
+        "hot_pages": int(row["hot_pages"]),
+        "batch_size": int(row["batch_size"]),
+        "alpha": float(row["alpha"]),
+        "k": float(row["k"]),
+        "m": float(row["m"]),
+        "policy": row["policy"],
+        "cost2_policy": float(row["cost2_policy"]),
+    }
 
 
-def plot_avg_speedup_by_policy(df: pd.DataFrame, outdir: Path) -> None:
-    grouped = (
-        df.groupby("policy", as_index=False)["g_of_x"]
-        .mean()
-        .sort_values("g_of_x", ascending=False)
-    )
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(grouped["policy"], grouped["g_of_x"])
-    ax.set_title("Average g_of_x by policy")
-    ax.set_ylabel("Average g_of_x")
-    ax.set_xlabel("Policy")
-    ax.tick_params(axis="x", rotation=20)
-    save_fig(fig, outdir, "avg_g_of_x_by_policy.png")
+def row_matches_filters(row: dict[str, object]) -> bool:
+    if row["num_pages"] != FILTERS["num_pages"]:
+        return False
+    if row["hot_pages"] != FILTERS["hot_pages"]:
+        return False
+    if row["batch_size"] != FILTERS["batch_size"]:
+        return False
+    if not float_equal(float(row["alpha"]), FILTERS["alpha"]):
+        return False
+    return True
 
 
-def plot_param_lines(df: pd.DataFrame, outdir: Path, param: str) -> None:
-    fig, ax = plt.subplots(figsize=(8, 5))
+def load_filtered_rows(csv_path: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
 
-    for policy in sorted(df["policy"].unique()):
-        sub = df[df["policy"] == policy]
-        grouped = sub.groupby(param, as_index=False)["g_of_x"].mean().sort_values(param)
-        ax.plot(grouped[param], grouped["g_of_x"], marker="o", label=policy)
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
 
-    ax.set_title(f"Average g_of_x vs {param}")
-    ax.set_xlabel(param)
-    ax.set_ylabel("Average g_of_x")
-    ax.legend()
-    save_fig(fig, outdir, f"avg_g_of_x_vs_{param}.png")
+        required_cols = {
+            "num_pages",
+            "hot_pages",
+            "batch_size",
+            "alpha",
+            "k",
+            "m",
+            "policy",
+            "cost2_policy",
+        }
+        missing = required_cols - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"Missing required columns in CSV: {sorted(missing)}")
 
+        for raw_row in reader:
+            row = parse_row(raw_row)
+            if row_matches_filters(row):
+                rows.append(row)
 
-def plot_fraction_tracking(df: pd.DataFrame, outdir: Path) -> None:
-    if "chosen_target_fraction" not in df.columns or "final_fraction" not in df.columns:
-        return
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-
-    for policy in sorted(df["policy"].unique()):
-        sub = df[df["policy"] == policy]
-        ax.scatter(
-            sub["chosen_target_fraction"],
-            sub["final_fraction"],
-            label=policy,
-            alpha=0.7,
+    if not rows:
+        raise ValueError(
+            "Filtering removed all rows. Adjust FILTERS to match your CSV."
         )
 
-    max_val = max(
-        1.0,
-        float(df["chosen_target_fraction"].max(skipna=True)),
-        float(df["final_fraction"].max(skipna=True)),
+    return rows
+
+
+def normalize_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """
+    Normalize each policy cost against no_migration for the same scenario.
+    Scenario key is fixed-filter dimensions plus (k, m).
+    """
+    baseline_by_key: dict[tuple, float] = {}
+
+    for row in rows:
+        key = (
+            row["num_pages"],
+            row["hot_pages"],
+            row["batch_size"],
+            round(float(row["alpha"]), 12),
+            round(float(row["k"]), 12),
+            round(float(row["m"]), 12),
+        )
+        if row["policy"] == "no_migration":
+            baseline_by_key[key] = float(row["cost2_policy"])
+
+    if not baseline_by_key:
+        raise ValueError("No no_migration rows found after filtering.")
+
+    normalized: list[dict[str, object]] = []
+
+    for row in rows:
+        key = (
+            row["num_pages"],
+            row["hot_pages"],
+            row["batch_size"],
+            round(float(row["alpha"]), 12),
+            round(float(row["k"]), 12),
+            round(float(row["m"]), 12),
+        )
+
+        if key not in baseline_by_key:
+            raise ValueError(f"No no_migration baseline found for scenario key: {key}")
+
+        baseline_cost = baseline_by_key[key]
+        policy_cost = float(row["cost2_policy"])
+
+        normalized.append(
+            {
+                "k": float(row["k"]),
+                "m": float(row["m"]),
+                "lambda": float(row["k"]) * float(row["m"]),
+                "policy": str(row["policy"]),
+                "normalized_cost": policy_cost / baseline_cost,
+            }
+        )
+
+    return normalized
+
+
+def build_scenario_table(
+    rows: list[dict[str, object]],
+) -> dict[tuple[float, float], dict[str, float]]:
+    """
+    Build a table:
+        (k, m) -> {
+            "lambda": ...,
+            "no_migration": ...,
+            "full_migration": ...,
+            ...
+        }
+
+    If duplicates exist, average normalized costs per policy.
+    """
+    grouped: dict[tuple[float, float], dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
     )
-    ax.plot([0, max_val], [0, max_val], linestyle="--")
-    ax.set_title("Chosen target fraction vs final realized fraction")
-    ax.set_xlabel("Chosen target fraction")
-    ax.set_ylabel("Final realized fraction")
-    ax.legend()
-    save_fig(fig, outdir, "chosen_vs_final_fraction.png")
+
+    for row in rows:
+        k = round(float(row["k"]), 12)
+        m = round(float(row["m"]), 12)
+        policy = str(row["policy"])
+        if policy not in POLICY_ORDER:
+            continue
+        grouped[(k, m)][policy].append(float(row["normalized_cost"]))
+
+    scenarios: dict[tuple[float, float], dict[str, float]] = {}
+
+    for (k, m), policy_map in grouped.items():
+        scenario: dict[str, float] = {
+            "k": k,
+            "m": m,
+            "lambda": k * m,
+        }
+        for policy in POLICY_ORDER:
+            values = policy_map.get(policy, [])
+            if not values:
+                break
+            scenario[policy] = sum(values) / len(values)
+        else:
+            scenarios[(k, m)] = scenario
+
+    if not scenarios:
+        raise ValueError("No complete scenarios found with all required policies.")
+
+    return scenarios
 
 
-def plot_moved_pages_vs_speedup(df: pd.DataFrame, outdir: Path) -> None:
-    if "moved_pages" not in df.columns:
-        return
+def choose_representative_scenarios(
+    scenarios: dict[tuple[float, float], dict[str, float]],
+    target_lambdas: list[float],
+) -> list[dict[str, float]]:
+    """
+    For each target lambda, choose the closest available scenario.
+    Avoid reusing the same (k,m) scenario twice if possible.
+    """
+    available = list(scenarios.values())
+    chosen: list[dict[str, float]] = []
+    used_keys: set[tuple[float, float]] = set()
 
-    fig, ax = plt.subplots(figsize=(7, 6))
-    for policy in sorted(df["policy"].unique()):
-        sub = df[df["policy"] == policy]
-        ax.scatter(sub["moved_pages"], sub["g_of_x"], label=policy, alpha=0.7)
+    for target in target_lambdas:
+        candidates = sorted(
+            available, key=lambda s: (abs(s["lambda"] - target), s["lambda"])
+        )
 
-    ax.set_title("Moved pages vs g_of_x")
-    ax.set_xlabel("Moved pages")
-    ax.set_ylabel("g_of_x")
-    ax.legend()
-    save_fig(fig, outdir, "moved_pages_vs_g_of_x.png")
+        picked = None
+        for cand in candidates:
+            key = (cand["k"], cand["m"])
+            if key not in used_keys:
+                picked = cand
+                used_keys.add(key)
+                break
 
+        if picked is None and candidates:
+            picked = candidates[0]
 
-def plot_heatmap_for_paper_policy(df: pd.DataFrame, outdir: Path) -> None:
-    sub = df[df["policy"] == "paper_fraction_guided"].copy()
-    if sub.empty:
-        return
+        if picked is not None:
+            chosen.append(picked)
 
-    needed = ["k", "m", "g_of_x"]
-    require_columns(sub, needed)
-
-    if sub["k"].nunique() < 2 or sub["m"].nunique() < 2:
-        return
-
-    table = safe_mean_table(sub, index="m", columns="k", values="g_of_x")
-    if table.empty:
-        return
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(table.values, aspect="auto", origin="lower")
-
-    ax.set_title("Paper-guided policy: mean g_of_x over m × k")
-    ax.set_xlabel("k")
-    ax.set_ylabel("m")
-    ax.set_xticks(range(len(table.columns)))
-    ax.set_xticklabels([f"{x:g}" for x in table.columns])
-    ax.set_yticks(range(len(table.index)))
-    ax.set_yticklabels([f"{x:g}" for x in table.index])
-
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Mean g_of_x")
-
-    save_fig(fig, outdir, "paper_policy_heatmap_m_by_k.png")
+    # Sort chosen scenarios by actual lambda for clean x-axis order
+    chosen.sort(key=lambda s: s["lambda"])
+    return chosen
 
 
-def plot_alpha_slices_for_paper_policy(df: pd.DataFrame, outdir: Path) -> None:
-    sub = df[df["policy"] == "paper_fraction_guided"].copy()
-    if sub.empty or "alpha" not in sub.columns:
-        return
+def make_bar_plot(chosen: list[dict[str, float]], output_path: str) -> None:
+    if not chosen:
+        raise ValueError("No representative scenarios selected.")
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    x_positions = list(range(len(chosen)))
+    width = 0.18
 
-    for alpha_val in sorted(sub["alpha"].dropna().unique()):
-        alpha_df = sub[sub["alpha"] == alpha_val]
-        grouped = alpha_df.groupby("k", as_index=False)["g_of_x"].mean().sort_values("k")
-        ax.plot(grouped["k"], grouped["g_of_x"], marker="o", label=f"alpha={alpha_val:g}")
+    plt.figure(figsize=(10, 5.8))
 
-    ax.set_title("Paper-guided policy: g_of_x vs k for each alpha")
-    ax.set_xlabel("k")
-    ax.set_ylabel("Average g_of_x")
-    ax.legend()
-    save_fig(fig, outdir, "paper_policy_g_of_x_vs_k_by_alpha.png")
+    for idx, policy in enumerate(POLICY_ORDER):
+        offsets = [x + (idx - 1.5) * width for x in x_positions]
+        heights = [scenario[policy] for scenario in chosen]
+
+        plt.bar(
+            offsets,
+            heights,
+            width=width,
+            label=POLICY_LABELS[policy],
+        )
+
+    # Tick labels show actual lambda values chosen
+    tick_labels = [
+        f"λ={scenario['lambda']:.2f}\n(k={scenario['k']:.2f}, m={scenario['m']:.2f})"
+        for scenario in chosen
+    ]
+
+    plt.xticks(x_positions, tick_labels)
+    plt.axhline(1.0, linestyle=":", linewidth=1)
+    plt.text(
+        -0.45,
+        1.0,
+        " no-migration baseline",
+        ha="left",
+        va="bottom",
+        fontsize=10,
+    )
+
+    plt.title(
+        "Representative policy comparison across λ = m × k\n"
+        f"(num_pages={FILTERS['num_pages']}, hot_pages={FILTERS['hot_pages']}, "
+        f"batch_size={FILTERS['batch_size']}, alpha={FILTERS['alpha']})"
+    )
+    plt.xlabel("Representative λ regimes")
+    plt.ylabel("Normalized cost (policy cost / no_migration cost)")
+    plt.legend()
+    plt.grid(True, axis="y", alpha=0.3)
+    plt.tight_layout()
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output, dpi=300, bbox_inches="tight")
+    plt.close()
 
 
-def summarize_best_configs(df: pd.DataFrame, outdir: Path) -> None:
-    cols = [c for c in [
-        "policy", "num_pages", "hot_pages", "batch_size", "k", "m", "alpha",
-        "chosen_target_fraction", "final_fraction", "moved_pages", "g_of_x"
-    ] if c in df.columns]
-
-    ranked = df.sort_values("g_of_x", ascending=False)[cols].head(25)
-    out_csv = outdir / "top_25_by_g_of_x.csv"
-    ranked.to_csv(out_csv, index=False)
-    print(f"wrote {out_csv}")
-
-
-def apply_filters(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
-    out = df.copy()
-
-    if args.policy:
-        out = out[out["policy"].isin(args.policy)]
-
-    for col_name, value in [
-        ("num_pages", args.num_pages),
-        ("hot_pages", args.hot_pages),
-        ("batch_size", args.batch_size),
-        ("k", args.k),
-        ("m", args.m),
-        ("alpha", args.alpha),
-    ]:
-        if value is not None and col_name in out.columns:
-            out = out[out[col_name] == value]
-
-    return out
+def print_selected_scenarios(chosen: list[dict[str, float]]) -> None:
+    print("Selected representative scenarios:")
+    for s in chosen:
+        print(
+            f"  lambda={s['lambda']:.4f}, k={s['k']:.4f}, m={s['m']:.4f}, "
+            f"no_migration={s['no_migration']:.4f}, "
+            f"full_migration={s['full_migration']:.4f}, "
+            f"naive_hotness={s['naive_hotness']:.4f}, "
+            f"paper_fraction_guided={s['paper_fraction_guided']:.4f}"
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Plot CXL policy sweep CSV results.")
-    parser.add_argument("csv", help="Path to input CSV")
-    parser.add_argument("--outdir", default="plots", help="Output directory for plots")
-    parser.add_argument("--policy", action="append", help="Filter to one or more policies")
-    parser.add_argument("--num-pages", type=int, help="Filter to a single num_pages value")
-    parser.add_argument("--hot-pages", type=int, help="Filter to a single hot_pages value")
-    parser.add_argument("--batch-size", type=int, help="Filter to a single batch_size value")
-    parser.add_argument("--k", type=float, help="Filter to a single k value")
-    parser.add_argument("--m", type=float, help="Filter to a single m value")
-    parser.add_argument("--alpha", type=float, help="Filter to a single alpha value")
-    args = parser.parse_args()
+    filtered_rows = load_filtered_rows(INPUT_CSV)
+    normalized_rows = normalize_rows(filtered_rows)
+    scenarios = build_scenario_table(normalized_rows)
+    chosen = choose_representative_scenarios(scenarios, TARGET_LAMBDAS)
 
-    csv_path = Path(args.csv)
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
+    if not chosen:
+        raise ValueError("Could not select representative scenarios.")
 
-    df = pd.read_csv(csv_path)
-
-    required = ["policy", "g_of_x"]
-    require_columns(df, required)
-
-    # Numeric cleanup for safety
-    numeric_candidates = [
-        "num_pages", "hot_pages", "rounds", "accesses_per_round", "batch_size",
-        "tolerance", "r", "k", "m", "alpha", "chosen_target_fraction",
-        "final_fraction", "local_pages", "remote_pages", "moved_pages",
-        "promoted_pages", "demoted_pages", "rounds_with_migration",
-        "cost1_in_cxl", "cost2_policy", "g_of_x",
-    ]
-    for col in numeric_candidates:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = apply_filters(df, args)
-
-    if df.empty:
-        raise ValueError("No rows left after filtering.")
-
-    plot_avg_speedup_by_policy(df, outdir)
-
-    for param in ["k", "m", "alpha"]:
-        if param in df.columns and df[param].nunique() > 1:
-            plot_param_lines(df, outdir, param)
-
-    plot_fraction_tracking(df, outdir)
-    plot_moved_pages_vs_speedup(df, outdir)
-    plot_heatmap_for_paper_policy(df, outdir)
-    plot_alpha_slices_for_paper_policy(df, outdir)
-    summarize_best_configs(df, outdir)
+    print_selected_scenarios(chosen)
+    make_bar_plot(chosen, OUTPUT_PNG)
+    print(f"Wrote plot to: {OUTPUT_PNG}")
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ def main() -> None:
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig("build/fraction_guided_summary_fractions.png", dpi=150)
+    plt.savefig("plots/fraction_guided_summary_fractions.png", dpi=150)
 
     plt.figure(figsize=(10, 5))
     plt.plot(x, gaps, marker="o")
@@ -54,7 +54,7 @@ def main() -> None:
     plt.title("Model cost gap across scenarios")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig("build/fraction_guided_summary_gaps.png", dpi=150)
+    plt.savefig("plots/fraction_guided_summary_gaps.png", dpi=150)
 
     print(
         "Wrote plots to build/fraction_guided_summary_fractions.png and build/fraction_guided_summary_gaps.png"
@@ -63,3 +63,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
